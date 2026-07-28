@@ -31,6 +31,7 @@ public sealed class PrMonitorApp
 
     private List<PrEntry> _created = new();
     private List<PrEntry> _reviewing = new();
+    private DateTime _nextRefreshAt;
 
     public PrMonitorApp(AzureDevOpsClient client, string org, string myId)
     {
@@ -45,7 +46,7 @@ public sealed class PrMonitorApp
         _app = app;
         app.Init();
 
-        _main = new Window { Title = "AzDO PR Monitor (auto-refresh every 5m)" };
+        _main = new Window();
 
         var createdFrame = new FrameView
         {
@@ -109,6 +110,7 @@ public sealed class PrMonitorApp
         {
             new Shortcut(Key.C.WithAlt, "Comments", ShowCommentsForSelected),
             new Shortcut(Key.O.WithAlt, "Open in browser", OpenSelectedInBrowser),
+            new Shortcut(Key.U.WithAlt, "Copy URL", CopySelectedUrlToClipboard),
             new Shortcut(Key.R.WithAlt, "Refresh now", () => _ = RefreshAsync(manual: true)),
             new Shortcut(Key.Q.WithAlt, "Quit", () => _main.RequestStop())
         });
@@ -124,7 +126,11 @@ public sealed class PrMonitorApp
         var headerAttr = new GuiAttribute(listScheme.Normal.Foreground, listScheme.Normal.Background, Terminal.Gui.Drawing.TextStyle.Bold);
         _columnHeader.SetScheme(listScheme with { Normal = headerAttr });
 
+        _nextRefreshAt = DateTime.UtcNow + PollInterval;
+        UpdateCountdownTitle();
+
         _ = PollLoopAsync();
+        _ = CountdownLoopAsync();
 
         app.Run(_main);
 
@@ -140,11 +146,34 @@ public sealed class PrMonitorApp
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
                 await RefreshAsync(manual: false);
+                _nextRefreshAt = DateTime.UtcNow + PollInterval;
             }
         }
         catch (OperationCanceledException)
         {
         }
+    }
+
+    private async Task CountdownLoopAsync()
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                _app.Invoke(UpdateCountdownTitle);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void UpdateCountdownTitle()
+    {
+        var remaining = _nextRefreshAt - DateTime.UtcNow;
+        if (remaining < TimeSpan.Zero) remaining = TimeSpan.Zero;
+        _main.Title = $"AzDO PR Monitor (refreshing in {(int)remaining.TotalMinutes:D2}:{remaining.Seconds:D2})";
     }
 
     private async Task RefreshAsync(bool manual)
@@ -182,7 +211,7 @@ public sealed class PrMonitorApp
 
         _statusLabel.Text = $"Last refresh: {snapshot.FetchedAt:HH:mm:ss}   " +
                              $"My PRs: {_created.Count}   " +
-                             "Alt+C Comments  Alt+O Open browser  Alt+R Refresh  Alt+Q/Esc Quit";
+                             "Alt+C Comments  Alt+O Open browser  Alt+U Copy URL  Alt+R Refresh  Alt+Q/Esc Quit";
 
         UpdateDetails();
     }
@@ -219,6 +248,10 @@ public sealed class PrMonitorApp
                 OpenSelectedInBrowser();
                 e.Handled = true;
                 break;
+            case KeyCode.U | KeyCode.AltMask:
+                CopySelectedUrlToClipboard();
+                e.Handled = true;
+                break;
             case KeyCode.R | KeyCode.AltMask:
                 _ = RefreshAsync(manual: true);
                 e.Handled = true;
@@ -242,6 +275,17 @@ public sealed class PrMonitorApp
         var entry = GetSelectedEntry();
         if (entry is null) return;
         OpenBrowser(entry.WebUrl);
+    }
+
+    private void CopySelectedUrlToClipboard()
+    {
+        var entry = GetSelectedEntry();
+        if (entry is null) return;
+
+        var ok = _app.Clipboard.IsSupported && _app.Clipboard.TrySetClipboardData(entry.WebUrl);
+        _statusLabel.Text = ok
+            ? $"Copied URL for !{entry.Pr.PullRequestId} to clipboard."
+            : "Clipboard not available on this platform/terminal.";
     }
 
     private static GuiScheme ReadableScheme()
