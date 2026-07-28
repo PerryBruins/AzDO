@@ -304,15 +304,16 @@ public sealed class PrMonitorApp
         }
 
         var links = entries
-            .Select(e => (LinkText: $"Pull Request {e.Pr.PullRequestId}", e.Pr.Title, e.WebUrl))
+            .Select(e => (LinkText: $"Pull Request {e.Pr.PullRequestId}", TitleText: $"{e.Pr.Title} ({e.RepoName})", e.WebUrl))
             .ToList();
 
         // Mirrors AzDO's own "Copy link" clipboard content: only "Pull Request NNNNN" is
         // the HTML anchor (e.g. Teams renders just that part as a clickable chip), with
-        // the title trailing as plain text, and the full label as the plain-text fallback.
+        // the title (and repo name in parens) trailing as plain text, and the full label
+        // as the plain-text fallback.
         var ok = OperatingSystem.IsMacOS()
             ? TrySetMacRichClipboard(links)
-            : _app.Clipboard.IsSupported && _app.Clipboard.TrySetClipboardData(string.Join(Environment.NewLine, links.Select(l => $"{l.LinkText}: {l.Title}")));
+            : _app.Clipboard.IsSupported && _app.Clipboard.TrySetClipboardData(string.Join(Environment.NewLine, links.Select(l => $"{l.LinkText}: {l.TitleText}")));
 
         _statusLabel.Text = ok
             ? entries.Count == 1
@@ -321,11 +322,11 @@ public sealed class PrMonitorApp
             : "Clipboard not available on this platform/terminal.";
     }
 
-    private static bool TrySetMacRichClipboard(List<(string LinkText, string Title, string WebUrl)> links)
+    private static bool TrySetMacRichClipboard(List<(string LinkText, string TitleText, string WebUrl)> links)
     {
         var html = string.Join("<br>", links.Select(l =>
-            $"<a href=\"{WebUtility.HtmlEncode(l.WebUrl)}\">{WebUtility.HtmlEncode(l.LinkText)}</a>: {WebUtility.HtmlEncode(l.Title)}"));
-        var plainText = string.Join(Environment.NewLine, links.Select(l => $"{l.LinkText}: {l.Title}"));
+            $"<a href=\"{WebUtility.HtmlEncode(l.WebUrl)}\">{WebUtility.HtmlEncode(l.LinkText)}</a>: {WebUtility.HtmlEncode(l.TitleText)}"));
+        var plainText = string.Join(Environment.NewLine, links.Select(l => $"{l.LinkText}: {l.TitleText}"));
 
         var htmlPath = Path.GetTempFileName();
         var scriptPath = Path.GetTempFileName();
