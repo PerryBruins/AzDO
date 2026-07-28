@@ -21,7 +21,7 @@ It does **not** call Azure DevOps's branch-policy/build-validation API, so "can 
 ## Setup
 
 ```bash
-export AZDO_ORG="your-org"      # defaults to "rr-wfm" if unset
+export AZDO_ORG="your-org"
 export AZDO_PAT="your-pat-here"
 dotnet run
 ```
@@ -39,14 +39,5 @@ Create a PAT at `https://dev.azure.com/{org}/_usersSettings/tokens`.
 | `Alt+Q` or `Esc` | Quit |
 
 > On macOS, `Alt`/`Option` shortcuts may need "Use Option as Meta key" enabled in your terminal's preferences (Terminal.app: Settings → Profiles → Keyboard; iTerm2: Preferences → Profiles → Keys → Left/Right Option key acts as Esc+). Otherwise Option+letter types an accented character instead of sending the shortcut.
-
-## How it works
-
-- **`Program.cs`** — reads `AZDO_ORG`/`AZDO_PAT`, resolves the authenticated user's identity via the AzDO `connectionData` API, and starts the TUI.
-- **`src/AzureDevOpsClient.cs`** — thin REST client (project listing, per-project PR search, comment threads) authenticated with a PAT over Basic auth.
-- **`src/PrDataService.cs`** — fans out across every project in the org (AzDO has no single org-wide PR search endpoint) and merges the results. Capped at 8 concurrent project queries.
-- **`src/Formatting.cs`** — turns raw PR data into list rows, column headers, the details-pane text, and comment-thread text; also computes the "can complete" heuristic.
-- **`src/PrMonitorApp.cs`** — the Terminal.Gui (v2) UI: the PR list, the details pane below it, keybindings, the 5-minute polling loop, and the comments dialog.
-- **`src/Models.cs`** — JSON DTOs for the Azure DevOps REST responses.
 
 Built with [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2.
