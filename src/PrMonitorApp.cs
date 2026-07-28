@@ -99,7 +99,10 @@ public sealed class PrMonitorApp
         _createdList.ValueChanged += (_, _) => UpdateDetails();
         _createdList.RowRender += (_, e) =>
         {
-            if (e.Row >= 0 && e.Row < _created.Count && Formatting.CompletionReadiness(_created[e.Row].Pr).CanComplete)
+            // Skip the selected row: RowAttribute overrides ListView's selection/focus
+            // color unconditionally, which would hide the selection highlight entirely.
+            if (e.Row >= 0 && e.Row != _createdList.SelectedItem && e.Row < _created.Count
+                && Formatting.CompletionReadiness(_created[e.Row].Pr).CanComplete)
             {
                 e.RowAttribute = new GuiAttribute(GuiColor.Black, GuiColor.BrightGreen);
             }
