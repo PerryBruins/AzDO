@@ -76,7 +76,9 @@ public static class Formatting
     }
 
     public static string CreatedHeader(int projectWidth, int repoWidth) =>
-        $"  {"Appr",-ApprovalWidth} {"PR#",-PrIdWidth} {"Age",-AgeWidth} " +
+        // 2 leading spaces line up with the icon+space row prefix; 2 more account for
+        // ListView's own mark-glyph column (reserved whenever ShowMarks is enabled).
+        $"    {"Appr",-ApprovalWidth} {"PR#",-PrIdWidth} {"Age",-AgeWidth} " +
         $"{FitColumn("Project", projectWidth)} {FitColumn("Repo", repoWidth)} Title";
 
     public static string CreatedRow(PrEntry entry, int projectWidth, int repoWidth)
