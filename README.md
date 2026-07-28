@@ -10,7 +10,7 @@ A terminal UI app that keeps an eye on your outstanding Azure DevOps pull reques
 - Highlights rows that are ready to complete (black-on-bright-green).
 - Lets you view a PR's comment threads inline, without leaving the terminal.
 - Opens a PR in your default browser with one keystroke.
-- Copies a PR's URL to the clipboard with one keystroke, ready to paste and share.
+- Copies a PR link to the clipboard with one keystroke, ready to paste and share — mark multiple rows to copy them all at once. On macOS this matches AzDO's own "Copy link" format (e.g. pasting into Teams renders "Pull Request 38549: Title" as a clickable link); other platforms copy the plain title text.
 
 It does **not** call Azure DevOps's branch-policy/build-validation API, so "can complete" is a heuristic (required reviewers + merge conflicts + draft state), not the full policy engine AzDO itself evaluates.
 
@@ -36,7 +36,8 @@ Create a PAT at `https://dev.azure.com/{org}/_usersSettings/tokens`.
 | `↑`/`↓` | Move selection |
 | `Enter` or `Alt+C` | View comments for the selected PR |
 | `Alt+O` | Open the selected PR in your default browser |
-| `Alt+U` | Copy the selected PR's URL to the clipboard |
+| `Space` | Mark/unmark the highlighted PR for a multi-select |
+| `Alt+U` | Copy marked PRs' links to the clipboard (or just the highlighted one if none are marked) |
 | `Alt+R` | Refresh now |
 | `Alt+Q` or `Esc` | Quit |
 

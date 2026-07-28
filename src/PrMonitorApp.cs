@@ -1,5 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Linq;
+using System.IO;
+using System.Net;
 using Terminal.Gui.App;
 using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
@@ -73,6 +76,9 @@ public sealed class PrMonitorApp
         // before they ever reach KeyDown, which is why letter shortcuts silently did nothing.
         _createdList.KeystrokeNavigator = null;
         _reviewingList.KeystrokeNavigator = null;
+        // Space toggles a mark on the highlighted row; marked rows are what Alt+U copies.
+        _createdList.MarkMultiple = true;
+        _createdList.ShowMarks = true;
         createdFrame.Add(_columnHeader, _createdList);
         // Column widths depend on terminal size; re-layout whenever the list is resized.
         _createdList.FrameChanged += (_, _) => RebuildCreatedListDisplay();
@@ -279,13 +285,76 @@ public sealed class PrMonitorApp
 
     private void CopySelectedUrlToClipboard()
     {
-        var entry = GetSelectedEntry();
-        if (entry is null) return;
+        var marked = _createdList.GetAllMarkedItems()
+            .Where(i => i >= 0 && i < _created.Count)
+            .OrderBy(i => i)
+            .Select(i => _created[i])
+            .ToList();
 
-        var ok = _app.Clipboard.IsSupported && _app.Clipboard.TrySetClipboardData(entry.WebUrl);
+        List<PrEntry> entries;
+        if (marked.Count > 0)
+        {
+            entries = marked;
+        }
+        else
+        {
+            var entry = GetSelectedEntry();
+            if (entry is null) return;
+            entries = new List<PrEntry> { entry };
+        }
+
+        var links = entries
+            .Select(e => (Label: $"Pull Request {e.Pr.PullRequestId}: {e.Pr.Title}", e.WebUrl))
+            .ToList();
+
+        // Mirrors AzDO's own "Copy link" clipboard content: an HTML anchor for rich
+        // targets (e.g. Teams renders it as a clickable "Pull Request NNNNN" chip),
+        // with the plain label text as the fallback for plain-text-only targets.
+        var ok = OperatingSystem.IsMacOS()
+            ? TrySetMacRichClipboard(links)
+            : _app.Clipboard.IsSupported && _app.Clipboard.TrySetClipboardData(string.Join(Environment.NewLine, links.Select(l => l.Label)));
+
         _statusLabel.Text = ok
-            ? $"Copied URL for !{entry.Pr.PullRequestId} to clipboard."
+            ? entries.Count == 1
+                ? $"Copied link for !{entries[0].Pr.PullRequestId} to clipboard."
+                : $"Copied {entries.Count} links to clipboard."
             : "Clipboard not available on this platform/terminal.";
+    }
+
+    private static bool TrySetMacRichClipboard(List<(string Label, string WebUrl)> links)
+    {
+        var html = string.Join("<br>", links.Select(l =>
+            $"<a href=\"{WebUtility.HtmlEncode(l.WebUrl)}\">{WebUtility.HtmlEncode(l.Label)}</a>"));
+        var plainText = string.Join(Environment.NewLine, links.Select(l => l.Label));
+
+        var htmlPath = Path.GetTempFileName();
+        var scriptPath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(htmlPath, html);
+
+            var escapedPlain = plainText.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            var script = "set the clipboard to {«class HTML»:(read (POSIX file \"" + htmlPath +
+                         "\") as «class HTML»), Unicode text:\"" + escapedPlain + "\"}";
+            File.WriteAllText(scriptPath, script);
+
+            var psi = new ProcessStartInfo("osascript", $"\"{scriptPath}\"")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false
+            };
+            using var proc = Process.Start(psi);
+            return proc is not null && proc.WaitForExit(3000) && proc.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            File.Delete(htmlPath);
+            File.Delete(scriptPath);
+        }
     }
 
     private static GuiScheme ReadableScheme()
