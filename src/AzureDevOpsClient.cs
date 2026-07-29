@@ -68,6 +68,24 @@ public sealed class AzureDevOpsClient : IDisposable
         }
     }
 
+    // Build validation runs as a branch policy, not a manually-posted PR status — it only
+    // shows up via the policy-evaluations API, keyed by the well-known "Build" policy type id.
+    public async Task<List<PolicyEvaluationRecord>> GetPolicyEvaluationsAsync(
+        string project, string projectId, int pullRequestId, CancellationToken ct)
+    {
+        var artifactId = Uri.EscapeDataString($"vstfs:///CodeReview/CodeReviewId/{projectId}/{pullRequestId}");
+        var url = $"{Uri.EscapeDataString(project)}/_apis/policy/evaluations?artifactId={artifactId}&api-version=7.1-preview.1";
+        try
+        {
+            var response = await _http.GetFromJsonAsync<PolicyEvaluationsResponse>(url, JsonOptions, ct);
+            return response?.Value ?? new List<PolicyEvaluationRecord>();
+        }
+        catch (HttpRequestException)
+        {
+            return new List<PolicyEvaluationRecord>();
+        }
+    }
+
     public async Task<List<CommentThread>> GetThreadsAsync(
         string project, string repositoryId, int pullRequestId, CancellationToken ct)
     {

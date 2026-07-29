@@ -101,6 +101,47 @@ public sealed class GitRepositoryRef
     public ProjectRef Project { get; set; } = new();
 }
 
+public sealed class PolicyEvaluationsResponse
+{
+    [JsonPropertyName("value")]
+    public List<PolicyEvaluationRecord> Value { get; set; } = new();
+}
+
+public sealed class PolicyEvaluationRecord
+{
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "";
+
+    [JsonPropertyName("configuration")]
+    public PolicyConfiguration Configuration { get; set; } = new();
+}
+
+public sealed class PolicyConfiguration
+{
+    [JsonPropertyName("isEnabled")]
+    public bool IsEnabled { get; set; }
+
+    [JsonPropertyName("type")]
+    public PolicyType Type { get; set; } = new();
+}
+
+public sealed class PolicyType
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = "";
+}
+
+public enum BuildState
+{
+    None,
+    Pending,
+    Succeeded,
+    Failed
+}
+
 public sealed class ThreadsResponse
 {
     [JsonPropertyName("value")]
@@ -160,6 +201,9 @@ public sealed class PrEntry
     public required PrKind Kind { get; init; }
     public required GitPullRequest Pr { get; init; }
     public required string Org { get; init; }
+
+    // Filled in by a second fetch pass after the entry is created (PrDataService.FetchBuildStatusesAsync).
+    public BuildState BuildStatus { get; set; } = BuildState.None;
 
     public string ProjectName => Pr.Repository.Project.Name;
     public string RepoName => Pr.Repository.Name;

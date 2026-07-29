@@ -7,6 +7,7 @@ A terminal UI app that keeps an eye on your outstanding Azure DevOps pull reques
 - Scans every project in an Azure DevOps organization for **active pull requests you created**.
 - Auto-refreshes every 5 minutes in the background; manual refresh is one keystroke away.
 - Shows approval status per reviewer (approved / approved-with-suggestions / waiting / rejected) and a computed **"can this be completed?"** verdict, based on required-reviewer votes, draft state, and merge status.
+- Shows a build-status flag per PR (✓ succeeded / ⟳ running / ✗ failed / · none), from the PR's status API.
 - Highlights rows that are ready to complete (black-on-bright-green).
 - Lets you view a PR's comment threads inline, without leaving the terminal.
 - Opens a PR in your default browser with one keystroke.

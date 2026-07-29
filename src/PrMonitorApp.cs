@@ -36,6 +36,21 @@ public sealed class PrMonitorApp
     private List<PrEntry> _reviewing = new();
     private DateTime _nextRefreshAt;
 
+    // Parallel to _createdList's rows: null marks a project-section divider row, which is
+    // not selectable (see HandleSelectionChanged).
+    private List<PrEntry?> _rowEntries = new();
+    private int? _lastNonHeaderIndex;
+    private bool _suppressSelectionEvents;
+    private GuiAttribute _sectionHeaderAttribute;
+
+    // Keyed by (Org, RepoName, PullRequestId) rather than list index, since refreshes can
+    // reorder/replace _created. Tracked independently of ListView's own marks: SetSource
+    // (called on every rebuild, e.g. on resize) wipes ListView's internal mark state.
+    private readonly HashSet<(string Org, string Repo, int Id)> _markedKeys = new();
+
+    private static (string Org, string Repo, int Id) MarkKey(PrEntry entry) =>
+        (entry.Org, entry.RepoName, entry.Pr.PullRequestId);
+
     public PrMonitorApp(AzureDevOpsClient client, string org, string myId)
     {
         _client = client;
@@ -65,7 +80,10 @@ public sealed class PrMonitorApp
             X = 0,
             Y = Pos.Bottom(createdFrame),
             Width = Dim.Fill(),
-            Height = Dim.Fill(1)
+            // Fill(2) reserves the last 2 rows: one for _statusLabel, one for the StatusBar
+            // below it. Fill(1) put both on the same row, with the StatusBar drawn on top
+            // permanently hiding _statusLabel (e.g. the "Last refresh" text never appeared).
+            Height = Dim.Fill(2)
         };
 
         _columnHeader = new Label { X = 0, Y = 0, Width = Dim.Fill() };
@@ -77,8 +95,8 @@ public sealed class PrMonitorApp
         _createdList.KeystrokeNavigator = null;
         _reviewingList.KeystrokeNavigator = null;
         // Space toggles a mark on the highlighted row; marked rows are what Alt+U copies.
-        _createdList.MarkMultiple = true;
-        _createdList.ShowMarks = true;
+        // Marks are tracked in _markedKeys (not ListView's built-in marks, see its declaration)
+        // and rendered as an explicit "[x]"/"[ ]" prefix in the row text.
         createdFrame.Add(_columnHeader, _createdList);
         // Column widths depend on terminal size; re-layout whenever the list is resized.
         _createdList.FrameChanged += (_, _) => RebuildCreatedListDisplay();
@@ -96,13 +114,20 @@ public sealed class PrMonitorApp
         detailsFrame.Add(_detailsView);
 
         _createdList.Accepted += (_, _) => ShowCommentsForSelected();
-        _createdList.ValueChanged += (_, _) => UpdateDetails();
+        _createdList.ValueChanged += (_, _) => HandleSelectionChanged();
         _createdList.RowRender += (_, e) =>
         {
+            if (e.Row < 0 || e.Row >= _rowEntries.Count) return;
+            var entry = _rowEntries[e.Row];
+            if (entry is null)
+            {
+                e.RowAttribute = _sectionHeaderAttribute;
+                return;
+            }
+
             // Skip the selected row: RowAttribute overrides ListView's selection/focus
             // color unconditionally, which would hide the selection highlight entirely.
-            if (e.Row >= 0 && e.Row != _createdList.SelectedItem && e.Row < _created.Count
-                && Formatting.CompletionReadiness(_created[e.Row].Pr).CanComplete)
+            if (e.Row != _createdList.SelectedItem && Formatting.CompletionReadiness(entry.Pr).CanComplete)
             {
                 e.RowAttribute = new GuiAttribute(GuiColor.Black, GuiColor.BrightGreen);
             }
@@ -113,7 +138,7 @@ public sealed class PrMonitorApp
         _createdList.KeyDown += HandleShortcutKey;
         _main.KeyDown += HandleShortcutKey;
 
-        _statusLabel = new Label { X = 0, Y = Pos.AnchorEnd(1), Width = Dim.Fill(), Text = "Loading..." };
+        _statusLabel = new Label { X = 0, Y = Pos.AnchorEnd(2), Width = Dim.Fill(), Text = "Loading..." };
 
         var statusBar = new StatusBar(new[]
         {
@@ -134,6 +159,11 @@ public sealed class PrMonitorApp
         // Make the column header stand out from the row content below it.
         var headerAttr = new GuiAttribute(listScheme.Normal.Foreground, listScheme.Normal.Background, Terminal.Gui.Drawing.TextStyle.Bold);
         _columnHeader.SetScheme(listScheme with { Normal = headerAttr });
+        // Divider row: white on grey, distinct from both the header and normal rows.
+        // RowAttribute is painted for the full row width regardless of the row string's
+        // length (ListView pads to Viewport.Width with the current attribute), so this
+        // covers the whole line, not just the "── Project (n) ──" text.
+        _sectionHeaderAttribute = new GuiAttribute(GuiColor.White, GuiColor.Gray, Terminal.Gui.Drawing.TextStyle.Bold);
 
         _nextRefreshAt = DateTime.UtcNow + PollInterval;
         UpdateCountdownTitle();
@@ -227,16 +257,75 @@ public sealed class PrMonitorApp
 
     private void RebuildCreatedListDisplay()
     {
-        var (projectWidth, repoWidth) = Formatting.ComputeColumnWidths(_createdList.Frame.Width);
-        _columnHeader.Text = Formatting.CreatedHeader(projectWidth, repoWidth);
+        var repoWidth = Formatting.ComputeRepoWidth(_createdList.Frame.Width);
+        _columnHeader.Text = Formatting.CreatedHeader(repoWidth);
 
-        var selected = _createdList.SelectedItem;
-        var display = new ObservableCollection<string>(_created.Select(e => Formatting.CreatedRow(e, projectWidth, repoWidth)));
-        _createdList.SetSource(display);
-        if (selected.HasValue && selected.Value < display.Count)
+        var previousKey = GetSelectedEntry() is { } prev ? MarkKey(prev) : ((string Org, string Repo, int Id)?)null;
+
+        var display = new List<string>();
+        var rowEntries = new List<PrEntry?>();
+        foreach (var group in _created.GroupBy(e => e.ProjectName).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
-            _createdList.SelectedItem = selected.Value;
+            display.Add(Formatting.ProjectSectionHeader(group.Key, group.Count(), _createdList.Frame.Width));
+            rowEntries.Add(null);
+            foreach (var entry in group)
+            {
+                display.Add(Formatting.CreatedRow(entry, _markedKeys.Contains(MarkKey(entry)), repoWidth));
+                rowEntries.Add(entry);
+            }
         }
+        _rowEntries = rowEntries;
+
+        var newIndex = previousKey.HasValue
+            ? rowEntries.FindIndex(e => e is not null && MarkKey(e) == previousKey.Value)
+            : -1;
+        if (newIndex < 0) newIndex = rowEntries.FindIndex(e => e is not null);
+
+        _suppressSelectionEvents = true;
+        try
+        {
+            _createdList.SetSource(new ObservableCollection<string>(display));
+            if (newIndex >= 0) _createdList.SelectedItem = newIndex;
+        }
+        finally
+        {
+            _suppressSelectionEvents = false;
+        }
+        _lastNonHeaderIndex = newIndex >= 0 ? newIndex : null;
+        UpdateDetails();
+    }
+
+    private void HandleSelectionChanged()
+    {
+        if (_suppressSelectionEvents) return;
+
+        var idx = _createdList.SelectedItem;
+        if (idx.HasValue && idx.Value >= 0 && idx.Value < _rowEntries.Count && _rowEntries[idx.Value] is null)
+        {
+            var direction = _lastNonHeaderIndex.HasValue && idx.Value < _lastNonHeaderIndex.Value ? -1 : 1;
+            var adjusted = FindNextNonHeader(idx.Value, direction);
+            if (adjusted.HasValue)
+            {
+                _createdList.SelectedItem = adjusted.Value;
+                return;
+            }
+        }
+
+        if (idx.HasValue) _lastNonHeaderIndex = idx.Value;
+        UpdateDetails();
+    }
+
+    private int? FindNextNonHeader(int from, int direction)
+    {
+        for (var i = from; i >= 0 && i < _rowEntries.Count; i += direction)
+        {
+            if (_rowEntries[i] is not null) return i;
+        }
+        for (var i = from; i >= 0 && i < _rowEntries.Count; i -= direction)
+        {
+            if (_rowEntries[i] is not null) return i;
+        }
+        return null;
     }
 
     private void UpdateDetails()
@@ -270,13 +359,25 @@ public sealed class PrMonitorApp
                 _main.RequestStop();
                 e.Handled = true;
                 break;
+            case KeyCode.Space:
+                {
+                    var entry = GetSelectedEntry();
+                    if (entry is not null)
+                    {
+                        var key = MarkKey(entry);
+                        if (!_markedKeys.Remove(key)) _markedKeys.Add(key);
+                        RebuildCreatedListDisplay();
+                    }
+                }
+                e.Handled = true;
+                break;
         }
     }
 
     private PrEntry? GetSelectedEntry()
     {
         var idx = _createdList.SelectedItem;
-        return idx.HasValue && idx.Value >= 0 && idx.Value < _created.Count ? _created[idx.Value] : null;
+        return idx.HasValue && idx.Value >= 0 && idx.Value < _rowEntries.Count ? _rowEntries[idx.Value] : null;
     }
 
     private void OpenSelectedInBrowser()
@@ -288,11 +389,7 @@ public sealed class PrMonitorApp
 
     private void CopySelectedUrlToClipboard()
     {
-        var marked = _createdList.GetAllMarkedItems()
-            .Where(i => i >= 0 && i < _created.Count)
-            .OrderBy(i => i)
-            .Select(i => _created[i])
-            .ToList();
+        var marked = _created.Where(e => _markedKeys.Contains(MarkKey(e))).ToList();
 
         List<PrEntry> entries;
         if (marked.Count > 0)

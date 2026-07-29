@@ -12,6 +12,7 @@ public sealed class PrDataService
     private readonly AzureDevOpsClient _client;
     private readonly string _org;
     private const int MaxConcurrentProjects = 8;
+    private const int MaxConcurrentStatusFetches = 8;
 
     public PrDataService(AzureDevOpsClient client, string org)
     {
@@ -57,11 +58,35 @@ public sealed class PrDataService
         created.Sort((a, b) => b.Pr.CreationDate.CompareTo(a.Pr.CreationDate));
         reviewing.Sort((a, b) => b.Pr.CreationDate.CompareTo(a.Pr.CreationDate));
 
+        // Only the visible ("My Pull Requests") list needs build status; the reviewing
+        // list is fetched but never shown (see PrMonitorApp).
+        await FetchBuildStatusesAsync(created, ct);
+
         return new PrSnapshot
         {
             CreatedByMe = created,
             ReviewingForMe = reviewing,
             FetchedAt = DateTimeOffset.Now
         };
+    }
+
+    private async Task FetchBuildStatusesAsync(List<PrEntry> entries, CancellationToken ct)
+    {
+        var gate = new SemaphoreSlim(MaxConcurrentStatusFetches);
+        var tasks = entries.Select(async entry =>
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                var evaluations = await _client.GetPolicyEvaluationsAsync(
+                    entry.ProjectName, entry.Pr.Repository.Project.Id, entry.Pr.PullRequestId, ct);
+                entry.BuildStatus = Formatting.AggregateBuildState(evaluations);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
+        await Task.WhenAll(tasks);
     }
 }
