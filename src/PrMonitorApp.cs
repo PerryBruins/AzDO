@@ -26,14 +26,20 @@ public sealed class PrMonitorApp
 
     private IApplication _app = null!;
     private Window _main = null!;
+    private Tabs _tabs = null!;
+    private View _prTab = null!;
+    private View _workItemsTab = null!;
     private ListView _createdList = null!;
     private ListView _reviewingList = null!;
+    private ListView _workItemList = null!;
     private TextView _detailsView = null!;
+    private TextView _workItemDetailsView = null!;
     private Label _statusLabel = null!;
     private Label _columnHeader = null!;
 
     private List<PrEntry> _created = new();
     private List<PrEntry> _reviewing = new();
+    private List<WorkItemEntry> _workItems = new();
     private DateTime _nextRefreshAt;
 
     // Parallel to _createdList's rows: null marks a project-section divider row, which is
@@ -80,10 +86,9 @@ public sealed class PrMonitorApp
             X = 0,
             Y = Pos.Bottom(createdFrame),
             Width = Dim.Fill(),
-            // Fill(2) reserves the last 2 rows: one for _statusLabel, one for the StatusBar
-            // below it. Fill(1) put both on the same row, with the StatusBar drawn on top
-            // permanently hiding _statusLabel (e.g. the "Last refresh" text never appeared).
-            Height = Dim.Fill(2)
+            // The 2-row reservation for _statusLabel/StatusBar now happens on _tabs itself
+            // (see its Height below) since both frames are nested inside a tab, not _main.
+            Height = Dim.Fill()
         };
 
         _columnHeader = new Label { X = 0, Y = 0, Width = Dim.Fill() };
@@ -113,6 +118,54 @@ public sealed class PrMonitorApp
         };
         detailsFrame.Add(_detailsView);
 
+        var workItemsFrame = new FrameView
+        {
+            Title = "My Work Items",
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Percent(55, DimPercentMode.Position)
+        };
+        var workItemDetailsFrame = new FrameView
+        {
+            Title = "Details",
+            X = 0,
+            Y = Pos.Bottom(workItemsFrame),
+            Width = Dim.Fill(),
+            Height = Dim.Fill()
+        };
+
+        var workItemColumnHeader = new Label { X = 0, Y = 0, Width = Dim.Fill(), Text = Formatting.WorkItemsHeader() };
+        _workItemList = new ListView { X = 0, Y = 1, Width = Dim.Fill(), Height = Dim.Fill() };
+        _workItemList.KeystrokeNavigator = null;
+        workItemsFrame.Add(workItemColumnHeader, _workItemList);
+
+        _workItemDetailsView = new TextView
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+            ReadOnly = true,
+            CanFocus = false,
+            Text = "Select a work item to see details."
+        };
+        workItemDetailsFrame.Add(_workItemDetailsView);
+
+        _workItemList.Accepted += (_, _) => OpenSelectedWorkItemInBrowser();
+        _workItemList.ValueChanged += (_, _) => UpdateWorkItemDetails();
+        _workItemList.KeyDown += HandleShortcutKey;
+
+        _prTab = new View { Title = "Pull Requests", Width = Dim.Fill(), Height = Dim.Fill() };
+        _prTab.Add(createdFrame, detailsFrame);
+
+        _workItemsTab = new View { Title = "Work Items", Width = Dim.Fill(), Height = Dim.Fill() };
+        _workItemsTab.Add(workItemsFrame, workItemDetailsFrame);
+
+        _tabs = new Tabs { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(2) };
+        _tabs.Add(_prTab);
+        _tabs.Add(_workItemsTab);
+
         _createdList.Accepted += (_, _) => ShowCommentsForSelected();
         _createdList.ValueChanged += (_, _) => HandleSelectionChanged();
         _createdList.RowRender += (_, e) =>
@@ -127,7 +180,9 @@ public sealed class PrMonitorApp
 
             // Skip the selected row: RowAttribute overrides ListView's selection/focus
             // color unconditionally, which would hide the selection highlight entirely.
-            if (e.Row != _createdList.SelectedItem && Formatting.CompletionReadiness(entry.Pr).CanComplete)
+            if (e.Row != _createdList.SelectedItem && Formatting.CompletionReadiness(
+                    entry.Pr, entry.MinReviewerPolicy, entry.MinimumApproverCount, entry.RequiredReviewerPolicy,
+                    entry.OtherPolicies, entry.BlockingPolicyNames).CanComplete)
             {
                 e.RowAttribute = new GuiAttribute(GuiColor.Black, GuiColor.BrightGreen);
             }
@@ -142,6 +197,19 @@ public sealed class PrMonitorApp
 
         var statusBar = new StatusBar(new[]
         {
+            new Shortcut(Key.D1.WithAlt, "PRs tab", () => _tabs.Value = _prTab),
+            new Shortcut(Key.D2.WithAlt, "Work items tab", () => _tabs.Value = _workItemsTab),
+            new Shortcut(Key.P.WithAlt, "PRs tab (first)", () =>
+            {
+                _tabs.Value = _prTab;
+                var firstIndex = _rowEntries.FindIndex(entry => entry is not null);
+                if (firstIndex >= 0) _createdList.SelectedItem = firstIndex;
+            }),
+            new Shortcut(Key.W.WithAlt, "Work items tab (first)", () =>
+            {
+                _tabs.Value = _workItemsTab;
+                if (_workItemList.Source is { Count: > 0 }) _workItemList.SelectedItem = 0;
+            }),
             new Shortcut(Key.C.WithAlt, "Comments", ShowCommentsForSelected),
             new Shortcut(Key.O.WithAlt, "Open in browser", OpenSelectedInBrowser),
             new Shortcut(Key.U.WithAlt, "Copy URL", CopySelectedUrlToClipboard),
@@ -149,16 +217,18 @@ public sealed class PrMonitorApp
             new Shortcut(Key.Q.WithAlt, "Quit", () => _main.RequestStop())
         });
 
-        _main.Add(createdFrame, detailsFrame, _statusLabel, statusBar);
+        _main.Add(_tabs, _statusLabel, statusBar);
 
         // Match the details pane's colors to the PR list's, keeping ReadOnly from
         // rendering as the theme's dim/low-contrast role.
         var listScheme = _createdList.GetScheme();
         _detailsView.SetScheme(listScheme with { ReadOnly = listScheme.Normal });
+        _workItemDetailsView.SetScheme(listScheme with { ReadOnly = listScheme.Normal });
 
         // Make the column header stand out from the row content below it.
         var headerAttr = new GuiAttribute(listScheme.Normal.Foreground, listScheme.Normal.Background, Terminal.Gui.Drawing.TextStyle.Bold);
         _columnHeader.SetScheme(listScheme with { Normal = headerAttr });
+        workItemColumnHeader.SetScheme(listScheme with { Normal = headerAttr });
         // Divider row: white on grey, distinct from both the header and normal rows.
         // RowAttribute is painted for the full row width regardless of the row string's
         // length (ListView pads to Viewport.Width with the current attribute), so this
@@ -242,17 +312,54 @@ public sealed class PrMonitorApp
     {
         _created = snapshot.CreatedByMe;
         _reviewing = snapshot.ReviewingForMe;
+        _workItems = snapshot.WorkItems;
 
         RebuildCreatedListDisplay();
+        RebuildWorkItemsListDisplay();
 
         var reviewingDisplay = new ObservableCollection<string>(_reviewing.Select(e => Formatting.ReviewingRow(e, _myId)));
         _reviewingList.SetSource(reviewingDisplay);
 
         _statusLabel.Text = $"Last refresh: {snapshot.FetchedAt:HH:mm:ss}   " +
-                             $"My PRs: {_created.Count}   " +
-                             "Alt+C Comments  Alt+O Open browser  Alt+U Copy URL  Alt+R Refresh  Alt+Q/Esc Quit";
+                             $"My PRs: {_created.Count}   My Work Items: {_workItems.Count}   " +
+                             "Alt+1/2 Tabs  Alt+P/W PRs/Work items (jump to first)  Alt+C Comments  Alt+O Open browser  Alt+U Copy URL  Alt+R Refresh  Alt+Q/Esc Quit";
 
         UpdateDetails();
+    }
+
+    private void RebuildWorkItemsListDisplay()
+    {
+        var previousId = GetSelectedWorkItemEntry()?.Item.Id;
+
+        var display = _workItems.Select(Formatting.WorkItemRow).ToList();
+        _workItemList.SetSource(new ObservableCollection<string>(display));
+
+        if (previousId.HasValue)
+        {
+            var idx = _workItems.FindIndex(w => w.Item.Id == previousId.Value);
+            if (idx >= 0) _workItemList.SelectedItem = idx;
+        }
+
+        UpdateWorkItemDetails();
+    }
+
+    private WorkItemEntry? GetSelectedWorkItemEntry()
+    {
+        var idx = _workItemList.SelectedItem;
+        return idx.HasValue && idx.Value >= 0 && idx.Value < _workItems.Count ? _workItems[idx.Value] : null;
+    }
+
+    private void UpdateWorkItemDetails()
+    {
+        var entry = GetSelectedWorkItemEntry();
+        _workItemDetailsView.Text = entry is null ? "Select a work item to see details." : Formatting.WorkItemDetailText(entry);
+    }
+
+    private void OpenSelectedWorkItemInBrowser()
+    {
+        var entry = GetSelectedWorkItemEntry();
+        if (entry is null) return;
+        OpenBrowser(entry.WebUrl);
     }
 
     private void RebuildCreatedListDisplay()
@@ -338,16 +445,38 @@ public sealed class PrMonitorApp
     {
         switch (e.KeyCode)
         {
+            case KeyCode.D1 | KeyCode.AltMask:
+                _tabs.Value = _prTab;
+                e.Handled = true;
+                break;
+            case KeyCode.D2 | KeyCode.AltMask:
+                _tabs.Value = _workItemsTab;
+                e.Handled = true;
+                break;
+            case KeyCode.W | KeyCode.AltMask:
+                _tabs.Value = _workItemsTab;
+                if (_workItemList.Source is { Count: > 0 }) _workItemList.SelectedItem = 0;
+                e.Handled = true;
+                break;
+            case KeyCode.P | KeyCode.AltMask:
+                _tabs.Value = _prTab;
+                {
+                    var firstIndex = _rowEntries.FindIndex(entry => entry is not null);
+                    if (firstIndex >= 0) _createdList.SelectedItem = firstIndex;
+                }
+                e.Handled = true;
+                break;
             case KeyCode.C | KeyCode.AltMask:
-                ShowCommentsForSelected();
+                if (_tabs.Value == _prTab) ShowCommentsForSelected();
                 e.Handled = true;
                 break;
             case KeyCode.O | KeyCode.AltMask:
-                OpenSelectedInBrowser();
+                if (_tabs.Value == _workItemsTab) OpenSelectedWorkItemInBrowser();
+                else OpenSelectedInBrowser();
                 e.Handled = true;
                 break;
             case KeyCode.U | KeyCode.AltMask:
-                CopySelectedUrlToClipboard();
+                if (_tabs.Value == _prTab) CopySelectedUrlToClipboard();
                 e.Handled = true;
                 break;
             case KeyCode.R | KeyCode.AltMask:
@@ -361,6 +490,7 @@ public sealed class PrMonitorApp
                 break;
             case KeyCode.Space:
                 {
+                    if (_tabs.Value != _prTab) break;
                     var entry = GetSelectedEntry();
                     if (entry is not null)
                     {

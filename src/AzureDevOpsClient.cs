@@ -86,6 +86,40 @@ public sealed class AzureDevOpsClient : IDisposable
         }
     }
 
+    // Org-wide WIQL query (no project segment in the URL) plus a batch field fetch —
+    // @Me resolves against the PAT's own identity, so no explicit user id is needed.
+    public async Task<List<WorkItem>> GetMyWorkItemsAsync(CancellationToken ct)
+    {
+        var wiql = new WiqlRequest
+        {
+            Query = "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me " +
+                    "AND [System.State] NOT IN ('Closed', 'Removed', 'Done') ORDER BY [System.ChangedDate] DESC"
+        };
+        var wiqlResponse = await _http.PostAsJsonAsync($"_apis/wit/wiql?api-version={ApiVersion}", wiql, JsonOptions, ct);
+        wiqlResponse.EnsureSuccessStatusCode();
+        var ids = (await wiqlResponse.Content.ReadFromJsonAsync<WiqlResponse>(JsonOptions, ct))
+            ?.WorkItems.Select(w => w.Id).ToList() ?? new List<int>();
+        if (ids.Count == 0) return new List<WorkItem>();
+
+        var fields = new List<string>
+        {
+            "System.Title", "System.WorkItemType", "System.State", "System.TeamProject",
+            "System.AssignedTo", "System.CreatedDate", "System.ChangedDate", "System.Description", "Microsoft.VSTS.TCM.ReproSteps"
+        };
+
+        var workItems = new List<WorkItem>();
+        // workitemsbatch caps out at 200 ids per call.
+        for (var skip = 0; skip < ids.Count; skip += 200)
+        {
+            var batchRequest = new WorkItemsBatchRequest { Ids = ids.Skip(skip).Take(200).ToList(), Fields = fields };
+            var batchResponse = await _http.PostAsJsonAsync($"_apis/wit/workitemsbatch?api-version={ApiVersion}", batchRequest, JsonOptions, ct);
+            batchResponse.EnsureSuccessStatusCode();
+            var batch = await batchResponse.Content.ReadFromJsonAsync<WorkItemsBatchResponse>(JsonOptions, ct);
+            if (batch is not null) workItems.AddRange(batch.Value);
+        }
+        return workItems;
+    }
+
     public async Task<List<CommentThread>> GetThreadsAsync(
         string project, string repositoryId, int pullRequestId, CancellationToken ct)
     {

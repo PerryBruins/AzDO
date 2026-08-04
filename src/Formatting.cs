@@ -1,4 +1,6 @@
+using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace AzDoPrMonitor;
 
@@ -14,14 +16,31 @@ public static class Formatting
         _ => "?"
     };
 
-    public static string OverallIcon(GitPullRequest pr)
+    public static string OverallIcon(
+        GitPullRequest pr,
+        PolicyState minReviewerPolicy = PolicyState.NotConfigured,
+        PolicyState requiredReviewerPolicy = PolicyState.NotConfigured,
+        PolicyState otherPolicies = PolicyState.NotConfigured)
     {
         if (pr.Reviewers.Any(r => r.Vote == -10)) return "✗";
         if (pr.Reviewers.Any(r => r.Vote == -5)) return "…";
-        var required = pr.Reviewers.Where(r => r.IsRequired).ToList();
-        var voters = required.Count > 0 ? required : pr.Reviewers;
-        if (voters.Count > 0 && voters.All(r => r.Vote is 10 or 5)) return "✓";
-        return "·";
+
+        // Trust ADO's own policy evaluations over deriving this from the reviewers list:
+        // votes can be delegated (one person voting on behalf of a required-reviewer
+        // group), which makes a naive isRequired/vote check unreliable.
+        var states = new[] { minReviewerPolicy, requiredReviewerPolicy, otherPolicies };
+        if (states.Any(s => s == PolicyState.Rejected)) return "✗";
+        if (states.Any(s => s == PolicyState.Pending)) return "·";
+
+        if (states.All(s => s == PolicyState.NotConfigured))
+        {
+            // No branch policy is configured — fall back to a plain reviewers-list check.
+            var required = pr.Reviewers.Where(r => r.IsRequired).ToList();
+            var voters = required.Count > 0 ? required : pr.Reviewers;
+            return voters.Count > 0 && voters.All(r => r.Vote is 10 or 5) ? "✓" : "·";
+        }
+
+        return "✓";
     }
 
     public static string MyVoteIcon(GitPullRequest pr, string myId)
@@ -32,6 +51,60 @@ public static class Formatting
 
     // Well-known, org-independent policy type id for the "Build" branch policy.
     private const string BuildPolicyTypeId = "0609b952-1397-4640-95ec-e00a01b2c241";
+
+    // Well-known, org-independent policy type id for the "Minimum number of reviewers" branch policy.
+    private const string MinimumReviewerPolicyTypeId = "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd";
+
+    // Well-known, org-independent policy type id for the "Required reviewers" branch policy
+    // (specific people/groups pinned to the PR — distinct from the minimum-count policy above).
+    private const string RequiredReviewerPolicyTypeId = "fd2167ab-b0be-447a-8ec8-39368250530e";
+
+    // Well-known, org-independent policy type id for the "Require a merge strategy" branch policy.
+    // Excluded from "can complete" entirely — it constrains how a PR is completed, not whether it's ready.
+    private const string MergeStrategyPolicyTypeId = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab";
+
+    public static int MinimumApproverCount(List<PolicyEvaluationRecord> evaluations) =>
+        evaluations.FirstOrDefault(e => e.Configuration.IsEnabled && e.Configuration.Type.Id == MinimumReviewerPolicyTypeId)
+            ?.Configuration.Settings.MinimumApproverCount ?? 0;
+
+    private static PolicyState StateFromEvaluations(List<PolicyEvaluationRecord> matches)
+    {
+        if (matches.Count == 0) return PolicyState.NotConfigured;
+        if (matches.Any(e => e.Status is "rejected" or "broken")) return PolicyState.Rejected;
+        if (matches.Any(e => e.Status is "queued" or "running")) return PolicyState.Pending;
+        if (matches.All(e => e.Status is "approved" or "notApplicable")) return PolicyState.Satisfied;
+        return PolicyState.Pending;
+    }
+
+    private static PolicyState AggregatePolicyState(List<PolicyEvaluationRecord> evaluations, string typeId) =>
+        StateFromEvaluations(evaluations.Where(e => e.Configuration.IsEnabled && e.Configuration.Type.Id == typeId).ToList());
+
+    public static PolicyState MinimumReviewerPolicyState(List<PolicyEvaluationRecord> evaluations) =>
+        AggregatePolicyState(evaluations, MinimumReviewerPolicyTypeId);
+
+    public static PolicyState RequiredReviewerPolicyState(List<PolicyEvaluationRecord> evaluations) =>
+        AggregatePolicyState(evaluations, RequiredReviewerPolicyTypeId);
+
+    private static readonly string[] SeparatelyTrackedPolicyTypeIds =
+        { BuildPolicyTypeId, MinimumReviewerPolicyTypeId, RequiredReviewerPolicyTypeId, MergeStrategyPolicyTypeId };
+
+    // Catch-all for every other enabled, blocking branch policy (comment requirements,
+    // merge strategy, work item linking, status checks, ...) so "can complete" reflects
+    // the full policy picture instead of just build + reviewer policies.
+    public static PolicyState OtherPolicyState(List<PolicyEvaluationRecord> evaluations) =>
+        StateFromEvaluations(evaluations
+            .Where(e => e.Configuration.IsEnabled && e.Configuration.IsBlocking
+                        && !SeparatelyTrackedPolicyTypeIds.Contains(e.Configuration.Type.Id))
+            .ToList());
+
+    public static List<string> BlockingPolicyNames(List<PolicyEvaluationRecord> evaluations) =>
+        evaluations
+            .Where(e => e.Configuration.IsEnabled && e.Configuration.IsBlocking
+                        && !SeparatelyTrackedPolicyTypeIds.Contains(e.Configuration.Type.Id)
+                        && e.Status is not ("approved" or "notApplicable"))
+            .Select(e => e.Configuration.Type.DisplayName)
+            .Distinct()
+            .ToList();
 
     public static BuildState AggregateBuildState(List<PolicyEvaluationRecord> evaluations)
     {
@@ -67,8 +140,24 @@ public static class Formatting
         return $"{Math.Max(1, (int)span.TotalMinutes)}m";
     }
 
-    public static string ApprovalSummary(GitPullRequest pr)
+    // A required-reviewer group ("[Product Development]\Fuji") is a container entry, not a
+    // real person — its own vote just mirrors whichever member voted on its behalf. That
+    // member also gets their own direct reviewer entry with the same vote, so counting
+    // container entries would count a group as an extra approver, and skipping them still
+    // leaves the real member's own entry to count once.
+    public static int DistinctApprovedCount(GitPullRequest pr) =>
+        pr.Reviewers.Where(r => !r.IsContainer && r.Vote is 10 or 5)
+            .Select(r => r.Id)
+            .Distinct()
+            .Count();
+
+    public static string ApprovalSummary(GitPullRequest pr, int minimumApproverCount = 0)
     {
+        if (minimumApproverCount > 0)
+        {
+            return $"{DistinctApprovedCount(pr)}/{minimumApproverCount}";
+        }
+
         var required = pr.Reviewers.Where(r => r.IsRequired).ToList();
         var voters = required.Count > 0 ? required : pr.Reviewers;
         if (voters.Count == 0) return "";
@@ -112,10 +201,10 @@ public static class Formatting
     {
         var pr = entry.Pr;
         var draft = pr.IsDraft ? "[DRAFT] " : "";
-        var approval = ApprovalSummary(pr);
+        var approval = ApprovalSummary(pr, entry.MinimumApproverCount);
         var prId = $"!{pr.PullRequestId}";
         var mark = marked ? "[x]" : "[ ]";
-        return $"{mark} {OverallIcon(pr)} {approval,-ApprovalWidth} {prId,-PrIdWidth} {Age(pr.CreationDate),-AgeWidth} {BuildIcon(entry.BuildStatus),-BuildWidth} " +
+        return $"{mark} {OverallIcon(pr, entry.MinReviewerPolicy, entry.RequiredReviewerPolicy, entry.OtherPolicies)} {approval,-ApprovalWidth} {prId,-PrIdWidth} {Age(pr.CreationDate),-AgeWidth} {BuildIcon(entry.BuildStatus),-BuildWidth} " +
                $"{FitColumn(entry.RepoName, repoWidth)} {draft}{pr.Title}";
     }
 
@@ -149,21 +238,47 @@ public static class Formatting
     private static string ShortRef(string refName) =>
         refName.StartsWith("refs/heads/", StringComparison.Ordinal) ? refName["refs/heads/".Length..] : refName;
 
-    public static (bool CanComplete, string Reason) CompletionReadiness(GitPullRequest pr)
+    public static (bool CanComplete, string Reason) CompletionReadiness(
+        GitPullRequest pr,
+        PolicyState minReviewerPolicy = PolicyState.NotConfigured,
+        int minimumApproverCount = 0,
+        PolicyState requiredReviewerPolicy = PolicyState.NotConfigured,
+        PolicyState otherPolicies = PolicyState.NotConfigured,
+        List<string>? blockingPolicyNames = null)
     {
         if (pr.IsDraft) return (false, "still a draft");
 
-        var required = pr.Reviewers.Where(r => r.IsRequired).ToList();
-        if (required.Any(r => r.Vote == -10)) return (false, "rejected by a required reviewer");
+        if (pr.Reviewers.Any(r => r.Vote == -10)) return (false, "rejected by a reviewer");
 
         if (pr.MergeStatus is "conflicts" or "failure" or "rejectedByPolicy")
             return (false, $"merge status is '{pr.MergeStatus}'");
 
-        var pending = required.Where(r => r.Vote is not (10 or 5)).ToList();
-        if (pending.Count > 0)
-            return (false, $"waiting on {pending.Count} required reviewer(s): {string.Join(", ", pending.Select(r => r.DisplayName))}");
+        if (minReviewerPolicy == PolicyState.Rejected)
+            return (false, "minimum-reviewer policy rejected");
+        if (minReviewerPolicy == PolicyState.Pending)
+            return (false, $"needs {minimumApproverCount} distinct approvals, has {DistinctApprovedCount(pr)}");
 
-        if (required.Any(r => r.Vote == -5)) return (true, "approved, but a reviewer is waiting for author changes");
+        if (requiredReviewerPolicy == PolicyState.Rejected)
+            return (false, "a required reviewer rejected");
+        if (requiredReviewerPolicy == PolicyState.Pending)
+            return (false, "waiting on a required reviewer");
+
+        if (otherPolicies is PolicyState.Rejected or PolicyState.Pending)
+        {
+            var names = blockingPolicyNames is { Count: > 0 } ? string.Join(", ", blockingPolicyNames) : "another branch policy";
+            return (false, $"blocked by policy: {names}");
+        }
+
+        if (minReviewerPolicy == PolicyState.NotConfigured && requiredReviewerPolicy == PolicyState.NotConfigured)
+        {
+            // Neither branch policy is configured — fall back to a plain reviewers-list check.
+            var required = pr.Reviewers.Where(r => r.IsRequired).ToList();
+            var pending = required.Where(r => r.Vote is not (10 or 5)).ToList();
+            if (pending.Count > 0)
+                return (false, $"waiting on {pending.Count} required reviewer(s): {string.Join(", ", pending.Select(r => r.DisplayName))}");
+        }
+
+        if (pr.Reviewers.Any(r => r.Vote == -5)) return (true, "approved, but a reviewer is waiting for author changes");
 
         return (true, "all required reviewers approved");
     }
@@ -195,11 +310,61 @@ public static class Formatting
         }
 
         sb.AppendLine();
-        var (canComplete, reason) = CompletionReadiness(pr);
+        var (canComplete, reason) = CompletionReadiness(
+            pr, entry.MinReviewerPolicy, entry.MinimumApproverCount, entry.RequiredReviewerPolicy,
+            entry.OtherPolicies, entry.BlockingPolicyNames);
         sb.AppendLine($"Can complete: {(canComplete ? "YES" : "NO")} — {reason}");
 
         return sb.ToString();
     }
+
+    private const int WiIdWidth = 7;
+    private const int WiTypeWidth = 20;
+    private const int WiStateWidth = 12;
+    private const int WiProjectWidth = 20;
+    private const int WiAgeWidth = 11;
+
+    public static string WorkItemsHeader() =>
+        $"{"Id",-WiIdWidth} {"Type",-WiTypeWidth} {"State",-WiStateWidth} {"Project",-WiProjectWidth} " +
+        $"{"Created",-WiAgeWidth} {"Changed",-WiAgeWidth} Title";
+
+    public static string WorkItemRow(WorkItemEntry entry)
+    {
+        var fields = entry.Item.Fields;
+        var id = $"#{entry.Item.Id}";
+        return $"{id,-WiIdWidth} {FitColumn(fields.WorkItemType, WiTypeWidth)} {FitColumn(fields.State, WiStateWidth)} " +
+               $"{FitColumn(fields.TeamProject, WiProjectWidth)} {FitColumn(Age(fields.CreatedDate) + " ago", WiAgeWidth)} " +
+               $"{FitColumn(Age(fields.ChangedDate) + " ago", WiAgeWidth)} {fields.Title}";
+    }
+
+    public static string WorkItemDetailText(WorkItemEntry entry)
+    {
+        var fields = entry.Item.Fields;
+        var sb = new StringBuilder();
+        sb.AppendLine($"#{entry.Item.Id}  {fields.Title}");
+        sb.AppendLine($"Type: {fields.WorkItemType}   State: {fields.State}   Project: {fields.TeamProject}");
+        sb.AppendLine($"Assigned to: {fields.AssignedTo?.DisplayName ?? "Unassigned"}");
+        sb.AppendLine($"Created: {fields.CreatedDate.LocalDateTime:yyyy-MM-dd HH:mm} ({Age(fields.CreatedDate)} ago)   " +
+                      $"Changed: {fields.ChangedDate.LocalDateTime:yyyy-MM-dd HH:mm} ({Age(fields.ChangedDate)} ago)");
+        sb.AppendLine();
+        if (!string.IsNullOrWhiteSpace(fields.Description))
+        {
+            sb.AppendLine(StripHtml(fields.Description));
+            sb.AppendLine();
+        }
+        if (!string.IsNullOrWhiteSpace(fields.ReproSteps))
+        {
+            sb.AppendLine("Repro steps:");
+            sb.AppendLine(StripHtml(fields.ReproSteps));
+            sb.AppendLine();
+        }
+        sb.AppendLine(entry.WebUrl);
+        return sb.ToString();
+    }
+
+    // Work item Description comes back as HTML; strip tags for plain-text display.
+    private static string StripHtml(string html) =>
+        WebUtility.HtmlDecode(Regex.Replace(html, "<[^>]+>", "")).Trim();
 
     public static string RenderThreads(List<CommentThread> threads)
     {

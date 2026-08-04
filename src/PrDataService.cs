@@ -4,6 +4,7 @@ public sealed class PrSnapshot
 {
     public required List<PrEntry> CreatedByMe { get; init; }
     public required List<PrEntry> ReviewingForMe { get; init; }
+    public required List<WorkItemEntry> WorkItems { get; init; }
     public required DateTimeOffset FetchedAt { get; init; }
 }
 
@@ -22,6 +23,7 @@ public sealed class PrDataService
 
     public async Task<PrSnapshot> FetchAsync(string myId, CancellationToken ct)
     {
+        var workItemsTask = _client.GetMyWorkItemsAsync(ct);
         var projects = await _client.GetProjectsAsync(ct);
 
         var created = new List<PrEntry>();
@@ -62,10 +64,16 @@ public sealed class PrDataService
         // list is fetched but never shown (see PrMonitorApp).
         await FetchBuildStatusesAsync(created, ct);
 
+        var workItems = (await workItemsTask)
+            .OrderByDescending(w => w.Fields.ChangedDate)
+            .Select(w => new WorkItemEntry { Item = w, Org = _org })
+            .ToList();
+
         return new PrSnapshot
         {
             CreatedByMe = created,
             ReviewingForMe = reviewing,
+            WorkItems = workItems,
             FetchedAt = DateTimeOffset.Now
         };
     }
@@ -81,6 +89,11 @@ public sealed class PrDataService
                 var evaluations = await _client.GetPolicyEvaluationsAsync(
                     entry.ProjectName, entry.Pr.Repository.Project.Id, entry.Pr.PullRequestId, ct);
                 entry.BuildStatus = Formatting.AggregateBuildState(evaluations);
+                entry.MinimumApproverCount = Formatting.MinimumApproverCount(evaluations);
+                entry.MinReviewerPolicy = Formatting.MinimumReviewerPolicyState(evaluations);
+                entry.RequiredReviewerPolicy = Formatting.RequiredReviewerPolicyState(evaluations);
+                entry.OtherPolicies = Formatting.OtherPolicyState(evaluations);
+                entry.BlockingPolicyNames = Formatting.BlockingPolicyNames(evaluations);
             }
             finally
             {
